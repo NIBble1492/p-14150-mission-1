@@ -1,5 +1,6 @@
 package com.back.simpleDb;
 
+import java.lang.reflect.Field;
 import java.sql.*;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -121,11 +122,11 @@ public class SimpleDb {
         }
     }
 
-    // 전체 row 조회하기
+    // 전체 row 조회하기 (Map 반환)
     public List<Map<String, Object>> selectRows(String sql, Object... params) {
         logSql(sql);
-
         List<Map<String, Object>> maps = new ArrayList<>();
+
         try (Connection connection = getConnection();
              PreparedStatement stmt = connection.prepareStatement(sql);
         ) {
@@ -136,7 +137,6 @@ public class SimpleDb {
 
             // 결과 데이터와 설계도(MetaData)를 준비합니다.
             try (ResultSet rs = stmt.executeQuery()) {
-
                 // 줄(Row) 단위로 반복합니다.
                 while (rs.next()) {
                     maps.add(rowToMap(rs));
@@ -146,6 +146,64 @@ public class SimpleDb {
             throw new RuntimeException(e);
         }
         return maps;
+    }
+
+    // 전체 row 조회하기 (객체 반환)
+    public <T> List<T> selectRows(Class<T> cls,String sql, Object... params) {
+        logSql(sql);
+        List<T> list = new ArrayList<>();
+
+        try (Connection connection = getConnection();
+             PreparedStatement stmt = connection.prepareStatement(sql);
+        ) {
+            // 파라마터 셋팅
+            for (int i = 0; i < params.length; i++) {
+                stmt.setObject(i+1, params[i]);
+            }
+
+            // 결과 데이터와 설계도(MetaData)를 준비합니다.
+            try (ResultSet rs = stmt.executeQuery()) {
+                // 줄(Row) 단위로 반복합니다.
+                while (rs.next()) {
+                    // 리플렉션으로 데이터를 T 타입 객체에 꽂아 넣어야 한다.
+                    T obj = mapRowToEntity(rs, cls);
+                    list.add(obj);
+                }
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+        return list;
+    }
+
+    private <T> T mapRowToEntity(ResultSet rs, Class<T> cls) throws Exception {
+        // 1. 객체 생성
+        T instance = cls.getDeclaredConstructor().newInstance();
+
+        // 2. 메타데이터로 컬럼 정보 가져오기
+        ResultSetMetaData metaData = rs.getMetaData();
+        int columnCount = metaData.getColumnCount();
+
+        // 3. 컬럼마다 루프 돌면서 필드에 채우기
+        for (int i = 1; i <= columnCount; i++) {
+            String columnName = metaData.getColumnLabel(i);
+            Object value = rs.getObject(i);
+
+            try {
+                // 필드 찾기 (DB 컬럼명과 필드명이 같다는 가정 하에!)
+                Field field = cls.getDeclaredField(columnName);
+                field.setAccessible(true);
+
+                // 여기서 잠깐! 데이터 타입 변환 로직이 필요할 수도 있습니다.
+                field.set(instance, value);
+            } catch (NoSuchFieldException e) {
+                // 클래스에 해당 필드가 없으면 그냥 넘어갑니다. (DB에는 있지만 객체에는 없을 수 있음)
+                continue;
+            }
+        }
+        return instance;
     }
 
     // 특정 row 조회하기
@@ -167,6 +225,37 @@ public class SimpleDb {
                 if (rs.next()) {
                     return rowToMap(rs);
                 }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+        return null;
+    }
+
+    // 특정 row 조회하기 (객체 반환)
+    public <T> T selectRow(Class<T> cls,String sql, Object... params) {
+        logSql(sql);
+        // selectRows 를 재사용하는 방식 (코드를 확 줄일 수 있음)
+        // List<T> rows = selectRows(cls, sql, params);
+        // return rows.isEmpty() ? null : rows.getFirst();
+
+        try (Connection connection = getConnection();
+             PreparedStatement stmt = connection.prepareStatement(sql);
+        ) {
+            // 파라마터 셋팅
+            for (int i = 0; i < params.length; i++) {
+                stmt.setObject(i+1, params[i]);
+            }
+
+            // 결과 데이터와 설계도(MetaData)를 준비합니다.
+            try (ResultSet rs = stmt.executeQuery()) {
+                // 줄(Row) 단위로 반복합니다.
+                if (rs.next()) {
+                    // 리플렉션으로 데이터를 T 타입 객체에 꽂아 넣어야 한다.
+                    return mapRowToEntity(rs, cls);
+                }
+            } catch (Exception e) {
+                throw new RuntimeException(e);
             }
         } catch (SQLException e) {
             throw new RuntimeException(e);

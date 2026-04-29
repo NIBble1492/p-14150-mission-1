@@ -86,11 +86,25 @@ public class Sql {
         return simpleDb.selectRows(sql, paramsArr);
     }
 
+    public <T> List<T> selectRows(Class<T> cls) {
+        String sql = sb.toString().trim();
+        Object[] paramsArr = params.toArray();
+
+        return simpleDb.selectRows(cls, sql, paramsArr);
+    }
+
     public Map<String, Object> selectRow() {
         String sql = sb.toString().trim();
         Object[] paramsArr = params.toArray();
 
         return simpleDb.selectRow(sql, paramsArr);
+    }
+
+    public <T> T selectRow(Class<T> cls) {
+        String sql = sb.toString().trim();
+        Object[] paramsArr = params.toArray();
+
+        return simpleDb.selectRow(cls, sql, paramsArr);
     }
 
     public LocalDateTime selectDatetime() {
