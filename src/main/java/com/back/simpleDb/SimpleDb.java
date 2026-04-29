@@ -17,6 +17,8 @@ public class SimpleDb {
     private boolean devMode = false;
     private String url;
 
+    private ThreadLocal<Connection> connectionContext = new ThreadLocal<>();
+
     public SimpleDb(String host, String user, String password, String dbName) {
         this.host = host;
         this.user = user;
@@ -28,6 +30,13 @@ public class SimpleDb {
 
     // DB 연결을 전담하는 헬퍼 메서드
     private Connection getConnection() throws SQLException {
+        // 현재 쓰레드 보관함에 커넥션이 있는지 확인한다.
+        Connection conn = connectionContext.get();
+
+        // 있다면 그대로 반환한다 (트랜잭션 중이라는 뜻)
+        if (conn != null) return conn;
+
+        // 없다면 새로 만들어서 반환한다.
         return DriverManager.getConnection(url, user, password);
     }
 
@@ -64,32 +73,49 @@ public class SimpleDb {
         }
     }
 
+    private void closeConnection(Connection conn) {
+        // 현재 쓰레드가 트랜잭션 중이 아닐 때만 진짜로 닫는다.
+        if (connectionContext.get() == null) {
+            try {
+                if (conn != null && !conn.isClosed()) {
+                    conn.close();
+                }
+            } catch (SQLException e) {
+                throw new RuntimeException(e);
+            }
+        }
+    }
 
-    // 삽입하기
+
+    // 삽입하기 (트랜잭션 대응 버전)
     public long insert(String sql, Object... params) {
         logSql(sql);
+        Connection connection = null; // finally에서 사용하기 위해 미리 선언
 
-        try (Connection connection = getConnection();
-            // RETURN_GENERATED_KEYS 옵션 추가
-            PreparedStatement stmt = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
-        ) {
-            // 파라마터 셋팅
-            for (int i = 0; i < params.length; i++) {
-                stmt.setObject(i+1, params[i]);
-            }
-            stmt.executeUpdate();
+        try {
+            connection = getConnection(); // 여기서 발생하는 SQLException을 아래 catch에서 잡습니다.
 
-            // 생성된 키 가져오기
-            try (ResultSet rs = stmt.getGeneratedKeys()) {
-                if (rs.next()) {
-                    return rs.getLong(1);
+            // PreparedStatement는 try-with-resources로 관리 (자동 close)
+            try (PreparedStatement stmt = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+                for (int i = 0; i < params.length; i++) {
+                    stmt.setObject(i + 1, params[i]);
+                }
+                stmt.executeUpdate();
+
+                try (ResultSet rs = stmt.getGeneratedKeys()) {
+                    if (rs.next()) {
+                        return rs.getLong(1);
+                    }
                 }
             }
-
         } catch (SQLException e) {
+            // 모든 SQL 관련 예외를 런타임 예외로 전환
             throw new RuntimeException(e);
+        } finally {
+            // 트랜잭션 여부를 closeConnection 메서드 내부에서 체크하므로 호출만 하면 끝!
+            closeConnection(connection);
         }
-        return -1; // 여기까지 오면 안 되지만, 문법상 추가
+        return -1;
     }
 
     // 수정하기
@@ -326,7 +352,6 @@ public class SimpleDb {
         return null;
     }
 
-
     public <T> List<T> selectList(Class<T> cls, String sql, Object... params) {
         List<T> list = new ArrayList<>();
         try (Connection connection = getConnection();
@@ -352,5 +377,46 @@ public class SimpleDb {
             throw new RuntimeException(e);
         }
         return list;
+    }
+
+    public void close() {
+    }
+
+    public void startTransaction() {
+        try {
+            Connection conn = DriverManager.getConnection(url, user, password);
+            conn.setAutoCommit(false); // 수동 커밋 모드로 전환 (트랜잭션 시작)
+            connectionContext.set(conn); // 보관함에 넣기
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public void rollback() {
+        Connection conn = connectionContext.get();
+        if (conn != null) {
+            try {
+                conn.rollback();
+                conn.close(); // 진짜로 닫기
+            } catch (SQLException e) {
+                throw new RuntimeException(e);
+            } finally {
+                connectionContext.remove(); // 보관함 비우기 (매우 중요!)
+            }
+        }
+    }
+
+    public void commit() {
+        Connection conn = connectionContext.get();
+        if (conn != null) {
+            try {
+                conn.commit(); // 현재 쓰레드의 커넥션에 '확정' 명령을 내림
+                conn.close();  // 일을 다 마쳤으니 커넥션을 진짜로 닫음
+            } catch (SQLException e) {
+                throw new RuntimeException(e);
+            } finally {
+                connectionContext.remove(); // 다음 작업을 위해 보관함 비우기 (필수!)
+            }
+        }
     }
 }
